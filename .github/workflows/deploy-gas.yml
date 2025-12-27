@@ -2,35 +2,70 @@ name: Deploy to Google Apps Script
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
+    branches:
+      - main
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v3
       
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
         with:
-          node-version: '20'
+          node-version: '18'
       
       - name: Install clasp
         run: npm install -g @google/clasp
       
-      - name: Setup credentials
-        run: echo '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json
-      
-      - name: Check .clasp.json
+      - name: Check if secret exists
         run: |
-          if [ ! -f .clasp.json ]; then
-            echo "Error: .clasp.json not found!"
+          if [ -z "${{ secrets.CLASPRC_JSON }}" ]; then
+            echo "❌ ERROR: CLASPRC_JSON secret is empty or not set!"
+            echo "Please check GitHub Settings > Secrets and variables > Actions"
+            exit 1
+          else
+            echo "✅ CLASPRC_JSON secret exists"
+            echo "Secret length: $(echo '${{ secrets.CLASPRC_JSON }}' | wc -c)"
+          fi
+      
+      - name: Create credentials file
+        run: |
+          mkdir -p ~/.config/@google
+          echo '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json
+          echo "✅ Credentials file created at ~/.clasprc.json"
+          ls -la ~/
+          if [ -f ~/.clasprc.json ]; then
+            echo "✅ File exists"
+            echo "File size: $(wc -c < ~/.clasprc.json) bytes"
+          else
+            echo "❌ File not created!"
             exit 1
           fi
-          cat .clasp.json
+      
+      - name: Verify project files
+        run: |
+          echo "=== Project structure ==="
+          ls -la
+          echo ""
+          echo "=== .clasp.json content ==="
+          if [ -f .clasp.json ]; then
+            cat .clasp.json
+          else
+            echo "❌ .clasp.json not found!"
+            exit 1
+          fi
+          echo ""
+          echo "=== src/ directory ==="
+          if [ -d src ]; then
+            ls -la src/
+          else
+            echo "❌ src/ directory not found!"
+            exit 1
+          fi
       
       - name: Push to Apps Script
         run: clasp push --force
-      
-      - name: Run tests
-        run: clasp run testAll || echo "Tests completed"
