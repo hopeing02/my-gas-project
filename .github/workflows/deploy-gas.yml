@@ -16,56 +16,59 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '18'
+          node-version: '20'
       
       - name: Install clasp
-        run: npm install -g @google/clasp
+        run: npm install -g @google/clasp@latest
       
-      - name: Check if secret exists
+      - name: Create and normalize credentials
         run: |
-          if [ -z "${{ secrets.CLASPRC_JSON }}" ]; then
-            echo "❌ ERROR: CLASPRC_JSON secret is empty or not set!"
-            echo "Please check GitHub Settings > Secrets and variables > Actions"
-            exit 1
-          else
-            echo "✅ CLASPRC_JSON secret exists"
-            echo "Secret length: $(echo '${{ secrets.CLASPRC_JSON }}' | wc -c)"
-          fi
+          echo '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json.raw
+          
+          # 새 형식을 구 형식으로 변환
+          node << 'SCRIPT'
+          const fs = require('fs');
+          const data = JSON.parse(fs.readFileSync(process.env.HOME + '/.clasprc.json.raw', 'utf8'));
+          
+          let result;
+          if (data.tokens && data.tokens.default) {
+            console.log('🔄 Converting new format to old format...');
+            const token = data.tokens.default;
+            result = {
+              token: {
+                access_token: token.access_token,
+                refresh_token: token.refresh_token,
+                scope: "https://www.googleapis.com/auth/script.projects https://www.googleapis.com/auth/script.webapp.deploy https://www.googleapis.com/auth/logging.read https://www.googleapis.com/auth/service.management https://www.googleapis.com/auth/drive.metadata.readonly https://www.googleapis.com/auth/drive.file",
+                token_type: token.token_type || "Bearer",
+                expiry_date: token.expiry_date
+              },
+              oauth2ClientSettings: {
+                clientId: token.client_id,
+                clientSecret: token.client_secret,
+                redirectUri: "http://localhost"
+              },
+              isLocalCreds: false
+            };
+            console.log('✅ Converted successfully');
+          } else if (data.token) {
+            console.log('✅ Already in old format');
+            result = data;
+          } else {
+            console.error('❌ Unknown format');
+            process.exit(1);
+          }
+          
+          fs.writeFileSync(process.env.HOME + '/.clasprc.json', JSON.stringify(result, null, 2));
+          console.log('✅ Credentials file ready');
+          SCRIPT
       
-      - name: Create credentials file
+      - name: Verify files
         run: |
-          mkdir -p ~/.config/@google
-          echo '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json
-          echo "✅ Credentials file created at ~/.clasprc.json"
-          ls -la ~/
-          if [ -f ~/.clasprc.json ]; then
-            echo "✅ File exists"
-            echo "File size: $(wc -c < ~/.clasprc.json) bytes"
-          else
-            echo "❌ File not created!"
-            exit 1
-          fi
-      
-      - name: Verify project files
-        run: |
-          echo "=== Project structure ==="
-          ls -la
+          echo "=== .clasp.json ==="
+          cat .clasp.json
           echo ""
-          echo "=== .clasp.json content ==="
-          if [ -f .clasp.json ]; then
-            cat .clasp.json
-          else
-            echo "❌ .clasp.json not found!"
-            exit 1
-          fi
-          echo ""
-          echo "=== src/ directory ==="
-          if [ -d src ]; then
-            ls -la src/
-          else
-            echo "❌ src/ directory not found!"
-            exit 1
-          fi
+          echo "=== src/ files ==="
+          ls -la src/
       
       - name: Push to Apps Script
         run: clasp push --force
