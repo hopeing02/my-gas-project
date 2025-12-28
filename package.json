@@ -1,0 +1,22 @@
+{
+  "name": "my-gas-project",
+  "version": "1.0.0",
+  "description": "Google Apps Script project with automated testing",
+  "scripts": {
+    "push": "clasp push",
+    "test": "clasp push && node test-runner.js",
+    "open": "clasp open"
+  },
+  "keywords": [
+    "google-apps-script",
+    "clasp"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "googleapis": "^105.0.0"
+  },
+  "devDependencies": {
+    "@google/clasp": "^2.4.2"
+  }
+}

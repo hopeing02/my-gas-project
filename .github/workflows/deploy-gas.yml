@@ -1,4 +1,4 @@
-name: Deploy to Google Apps Script
+name: Deploy and Test Apps Script
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
       - main
 
 jobs:
-  deploy:
+  deploy-and-test:
     runs-on: ubuntu-latest
     
     steps:
@@ -21,21 +21,22 @@ jobs:
         with:
           node-version: '20'
       
-      - name: Install clasp
-        run: npm install -g @google/clasp@latest
+      - name: Install dependencies
+        run: |
+          npm install -g @google/clasp@latest
+          npm install
       
-      - name: Create and normalize credentials
+      - name: Setup credentials
         run: |
           echo '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json.raw
           
-          # 새 형식을 구 형식으로 변환
           node << 'SCRIPT'
           const fs = require('fs');
           const data = JSON.parse(fs.readFileSync(process.env.HOME + '/.clasprc.json.raw', 'utf8'));
           
           let result;
           if (data.tokens && data.tokens.default) {
-            console.log('🔄 Converting new format to old format...');
+            console.log('🔄 Converting credentials format...');
             const token = data.tokens.default;
             result = {
               token: {
@@ -52,94 +53,155 @@ jobs:
               },
               isLocalCreds: false
             };
-            console.log('✅ Converted successfully');
-          } else if (data.token) {
-            console.log('✅ Already in old format');
-            result = data;
+            console.log('✅ Credentials converted');
           } else {
-            console.error('❌ Unknown format');
-            process.exit(1);
+            result = data;
           }
           
           fs.writeFileSync(process.env.HOME + '/.clasprc.json', JSON.stringify(result, null, 2));
-          console.log('✅ Credentials file ready');
           SCRIPT
       
-      - name: Verify project files
+      - name: Validate code syntax
         run: |
-          echo "=== .clasp.json ==="
-          cat .clasp.json
-          echo ""
-          echo "=== src/ files ==="
-          ls -la src/
-          echo ""
-          echo "=== Checking for test functions ==="
-          if grep -q "testAll" src/Code.gs; then
-            echo "✅ testAll() function found"
-          else
-            echo "⚠️  No testAll() function found"
-          fi
+          echo "🔍 Validating JavaScript syntax..."
+          for file in src/*.gs; do
+            if [ -f "$file" ]; then
+              echo "Checking $(basename $file)..."
+              node --check "$file"
+            fi
+          done
+          echo "✅ All files have valid syntax"
       
-      - name: Push to Apps Script
-        id: push
+      - name: Deploy to Apps Script
         run: |
-          echo "📤 Pushing code to Apps Script..."
+          echo "📤 Deploying to Apps Script..."
           clasp push --force
-          echo "✅ Code pushed successfully"
+          echo "✅ Code deployed successfully"
       
-      - name: Run Tests
+      - name: Enable Apps Script API
+        run: |
+          echo "🔧 Ensuring Apps Script API is enabled..."
+          clasp apis enable script 2>/dev/null || echo "API already enabled or using default"
+      
+      - name: Run automated tests
         id: test
-        continue-on-error: true
         run: |
-          echo "🧪 Running tests..."
+          echo "🧪 Running automated tests via Apps Script API..."
           
-          # testAll 함수 실행
-          TEST_OUTPUT=$(clasp run testAll 2>&1)
-          TEST_EXIT_CODE=$?
+          # Node.js 스크립트로 테스트 실행
+          node << 'TESTSCRIPT'
+          const { google } = require('googleapis');
+          const fs = require('fs');
           
-          echo "$TEST_OUTPUT"
+          async function runTests() {
+            try {
+              // 인증 정보 로드
+              const credentials = JSON.parse(fs.readFileSync(process.env.HOME + '/.clasprc.json', 'utf8'));
+              const claspConfig = JSON.parse(fs.readFileSync('.clasp.json', 'utf8'));
+              
+              // OAuth2 클라이언트 생성
+              const oauth2Client = new google.auth.OAuth2(
+                credentials.oauth2ClientSettings.clientId,
+                credentials.oauth2ClientSettings.clientSecret,
+                credentials.oauth2ClientSettings.redirectUri
+              );
+              
+              oauth2Client.setCredentials(credentials.token);
+              
+              // Apps Script API 클라이언트
+              const script = google.script({ version: 'v1', auth: oauth2Client });
+              
+              console.log('📋 Script ID:', claspConfig.scriptId);
+              console.log('🚀 Executing testAll() function...');
+              
+              // testAll 함수 실행
+              const response = await script.scripts.run({
+                scriptId: claspConfig.scriptId,
+                requestBody: {
+                  function: 'testAll',
+                  devMode: true
+                }
+              });
+              
+              console.log('\n=== Test Execution Results ===');
+              
+              if (response.data.error) {
+                console.error('❌ Test execution failed!');
+                console.error('Error:', response.data.error.details);
+                process.exit(1);
+              }
+              
+              if (response.data.response) {
+                const result = response.data.response.result;
+                console.log('Response:', JSON.stringify(result, null, 2));
+                
+                // 결과 분석
+                if (typeof result === 'object' && result.failed > 0) {
+                  console.error(`❌ Tests failed: ${result.failed} out of ${result.total}`);
+                  if (result.errors) {
+                    result.errors.forEach(err => {
+                      console.error(`  - ${err.test}: ${err.error}`);
+                    });
+                  }
+                  process.exit(1);
+                } else {
+                  console.log('✅ All tests passed!');
+                  if (result.total) {
+                    console.log(`   Total: ${result.total}`);
+                    console.log(`   Passed: ${result.passed}`);
+                  }
+                }
+              } else {
+                console.log('✅ Test function executed successfully');
+              }
+              
+            } catch (error) {
+              console.error('❌ Error running tests:', error.message);
+              
+              if (error.message.includes('User has not enabled the Apps Script API')) {
+                console.error('\n🔧 Please enable the Apps Script API:');
+                console.error('   1. Visit: https://script.google.com/home/usersettings');
+                console.error('   2. Enable "Google Apps Script API"');
+              }
+              
+              if (error.code === 404) {
+                console.error('\n⚠️  Script not found. Please verify:');
+                console.error('   1. Script ID is correct in .clasp.json');
+                console.error('   2. You have access to the script');
+              }
+              
+              process.exit(1);
+            }
+          }
           
-          if [ $TEST_EXIT_CODE -eq 0 ]; then
-            echo "✅ All tests passed!"
-            echo "test_result=success" >> $GITHUB_OUTPUT
-          else
-            echo "❌ Tests failed!"
-            echo "test_result=failure" >> $GITHUB_OUTPUT
-            exit 1
-          fi
+          runTests();
+          TESTSCRIPT
       
-      - name: Get execution logs
+      - name: Fetch execution logs
         if: always()
         run: |
+          echo ""
           echo "📋 Fetching execution logs..."
-          clasp logs --json --simplified || echo "⚠️  Could not fetch logs"
+          clasp logs --simplified || echo "⚠️  Could not fetch detailed logs"
       
-      - name: Test Results Summary
+      - name: Generate test report
         if: always()
         run: |
-          if [ "${{ steps.test.outputs.test_result }}" = "success" ]; then
-            echo "### ✅ Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.test.outcome }}" = "success" ]; then
+            echo "### ✅ Deployment & Tests Successful" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "All tests passed! Your code is now live." >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ steps.test.outputs.test_result }}" = "failure" ]; then
-            echo "### ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Tests failed. Please check the logs above." >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Code was pushed but tests did not pass.**" >> $GITHUB_STEP_SUMMARY
+            echo "🎉 All tests passed! Your code is deployed and working." >> $GITHUB_STEP_SUMMARY
           else
-            echo "### ⚠️  Test Status Unknown" >> $GITHUB_STEP_SUMMARY
+            echo "### ❌ Tests Failed" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Could not determine test results." >> $GITHUB_STEP_SUMMARY
+            echo "⚠️  Code was deployed but tests did not pass." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Action Required:**" >> $GITHUB_STEP_SUMMARY
+            echo "- Check the test logs above" >> $GITHUB_STEP_SUMMARY
+            echo "- Run \`clasp open\` to debug in Apps Script Editor" >> $GITHUB_STEP_SUMMARY
           fi
       
       - name: Notify on failure
         if: failure()
         run: |
-          echo "::error::Deployment or tests failed! Check the logs for details."
-      
-      - name: Deployment complete
-        if: success()
-        run: |
-          echo "🎉 Deployment and tests completed successfully!"
-          echo "Your Apps Script project is updated and tested."
+          echo "::error::Deployment or tests failed! Check logs above for details."
