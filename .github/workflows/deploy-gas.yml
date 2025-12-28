@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
   deploy:
@@ -62,13 +65,81 @@ jobs:
           console.log('✅ Credentials file ready');
           SCRIPT
       
-      - name: Verify files
+      - name: Verify project files
         run: |
           echo "=== .clasp.json ==="
           cat .clasp.json
           echo ""
           echo "=== src/ files ==="
           ls -la src/
+          echo ""
+          echo "=== Checking for test functions ==="
+          if grep -q "testAll" src/Code.gs; then
+            echo "✅ testAll() function found"
+          else
+            echo "⚠️  No testAll() function found"
+          fi
       
       - name: Push to Apps Script
-        run: clasp push --force
+        id: push
+        run: |
+          echo "📤 Pushing code to Apps Script..."
+          clasp push --force
+          echo "✅ Code pushed successfully"
+      
+      - name: Run Tests
+        id: test
+        continue-on-error: true
+        run: |
+          echo "🧪 Running tests..."
+          
+          # testAll 함수 실행
+          TEST_OUTPUT=$(clasp run testAll 2>&1)
+          TEST_EXIT_CODE=$?
+          
+          echo "$TEST_OUTPUT"
+          
+          if [ $TEST_EXIT_CODE -eq 0 ]; then
+            echo "✅ All tests passed!"
+            echo "test_result=success" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Tests failed!"
+            echo "test_result=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+      
+      - name: Get execution logs
+        if: always()
+        run: |
+          echo "📋 Fetching execution logs..."
+          clasp logs --json --simplified || echo "⚠️  Could not fetch logs"
+      
+      - name: Test Results Summary
+        if: always()
+        run: |
+          if [ "${{ steps.test.outputs.test_result }}" = "success" ]; then
+            echo "### ✅ Deployment Successful" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "All tests passed! Your code is now live." >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.test.outputs.test_result }}" = "failure" ]; then
+            echo "### ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Tests failed. Please check the logs above." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Code was pushed but tests did not pass.**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ⚠️  Test Status Unknown" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Could not determine test results." >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Deployment or tests failed! Check the logs for details."
+      
+      - name: Deployment complete
+        if: success()
+        run: |
+          echo "🎉 Deployment and tests completed successfully!"
+          echo "Your Apps Script project is updated and tested."
