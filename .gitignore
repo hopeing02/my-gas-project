@@ -1,5 +1,6 @@
 # Clasp credentials (절대 커밋하지 말 것!)
 .clasprc.json
+package-lock.json
 
 # Node modules
 node_modules/
