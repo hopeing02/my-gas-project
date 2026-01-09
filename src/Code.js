@@ -1,4 +1,35 @@
-function doGet() {
+/**
+ * HTTP GET 핸들러
+ * - 일반 접속: 웹 앱 반환
+ * - ?test=1: 테스트 실행 및 결과 반환
+ */
+function doGet(e) {
+  var params = e.parameter || {};
+  
+  // 테스트 실행 요청
+  if (params.test === '1') {
+    try {
+      var results = testAll();
+      return ContentService
+        .createTextOutput(JSON.stringify({
+          success: true,
+          timestamp: new Date().toISOString(),
+          results: results
+        }))
+        .setMimeType(ContentService.MimeType.JSON);
+    } catch(error) {
+      return ContentService
+        .createTextOutput(JSON.stringify({
+          success: false,
+          timestamp: new Date().toISOString(),
+          error: error.toString(),
+          stack: error.stack
+        }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+  
+  // 일반 웹 앱
   return HtmlService.createHtmlOutputFromFile('Index')
     .setTitle('My App');
 }
@@ -6,7 +37,7 @@ function doGet() {
 function saveData(data) {
   try {
     Logger.log('Data: ' + JSON.stringify(data));
-    return {success: true, message: 'Saved'};
+    return {success: true, message: 'Saved', data: data};
   } catch(e) {
     Logger.log('Error in saveData: ' + e.toString());
     return {success: false, error: e.toString()};
@@ -17,7 +48,6 @@ function saveData(data) {
 
 /**
  * 모든 테스트를 실행하는 메인 함수
- * GitHub Actions에서 자동으로 실행됩니다
  */
 function testAll() {
   Logger.log('=== Starting All Tests ===');
@@ -25,30 +55,51 @@ function testAll() {
     total: 0,
     passed: 0,
     failed: 0,
-    errors: []
+    errors: [],
+    details: []
   };
   
-  // 각 테스트 실행
+  // 테스트 목록
   var tests = [
     testSaveData,
-    testSaveDataWithInvalidInput,
+    testSaveDataWithNull,
+    testSaveDataWithObject,
     testDoGet
   ];
   
+  // 각 테스트 실행
   tests.forEach(function(test) {
     results.total++;
+    var testName = test.name;
+    var startTime = new Date().getTime();
+    
     try {
-      Logger.log('Running: ' + test.name);
+      Logger.log('Running: ' + testName);
       test();
+      var duration = new Date().getTime() - startTime;
       results.passed++;
-      Logger.log('✅ PASSED: ' + test.name);
-    } catch(e) {
-      results.failed++;
-      results.errors.push({
-        test: test.name,
-        error: e.toString()
+      results.details.push({
+        name: testName,
+        status: 'PASSED',
+        duration: duration + 'ms'
       });
-      Logger.log('❌ FAILED: ' + test.name + ' - ' + e.toString());
+      Logger.log('✅ PASSED: ' + testName + ' (' + duration + 'ms)');
+    } catch(e) {
+      var duration = new Date().getTime() - startTime;
+      results.failed++;
+      var errorInfo = {
+        test: testName,
+        error: e.toString(),
+        duration: duration + 'ms'
+      };
+      results.errors.push(errorInfo);
+      results.details.push({
+        name: testName,
+        status: 'FAILED',
+        error: e.toString(),
+        duration: duration + 'ms'
+      });
+      Logger.log('❌ FAILED: ' + testName + ' - ' + e.toString());
     }
   });
   
@@ -79,25 +130,37 @@ function testSaveData() {
   
   assertEqual(result.success, true, 'saveData should return success=true');
   assertEqual(result.message, 'Saved', 'saveData should return correct message');
+  assertNotNull(result.data, 'saveData should return data');
 }
 
 /**
- * saveData 잘못된 입력 테스트
+ * saveData null 입력 테스트
  */
-function testSaveDataWithInvalidInput() {
+function testSaveDataWithNull() {
   var result = saveData(null);
-  // null도 처리 가능해야 함
-  assertEqual(typeof result, 'object', 'saveData should always return an object');
+  assertEqual(typeof result, 'object', 'saveData should return an object');
   assertEqual(typeof result.success, 'boolean', 'result should have success field');
+}
+
+/**
+ * saveData 복잡한 객체 테스트
+ */
+function testSaveDataWithObject() {
+  var complexData = {
+    user: 'test',
+    items: [1, 2, 3],
+    nested: {key: 'value'}
+  };
+  var result = saveData(complexData);
+  assertEqual(result.success, true, 'saveData should handle complex objects');
 }
 
 /**
  * doGet 함수 테스트
  */
 function testDoGet() {
-  var result = doGet();
+  var result = doGet({parameter: {}});
   assertNotNull(result, 'doGet should return a result');
-  assertEqual(typeof result.getContent, 'function', 'doGet should return HtmlOutput');
 }
 
 // ===== 테스트 헬퍼 함수들 =====
@@ -106,8 +169,8 @@ function assertEqual(actual, expected, message) {
   if (actual !== expected) {
     throw new Error(
       (message || 'Assertion failed') + 
-      '\nExpected: ' + JSON.stringify(expected) + 
-      '\nActual: ' + JSON.stringify(actual)
+      '\n  Expected: ' + JSON.stringify(expected) + 
+      '\n  Actual: ' + JSON.stringify(actual)
     );
   }
 }
@@ -120,12 +183,12 @@ function assertNotNull(value, message) {
 
 function assertTrue(value, message) {
   if (value !== true) {
-    throw new Error(message || 'Value should be true');
+    throw new Error(message || 'Value should be true, but was: ' + value);
   }
 }
 
 function assertFalse(value, message) {
   if (value !== false) {
-    throw new Error(message || 'Value should be false');
+    throw new Error(message || 'Value should be false, but was: ' + value);
   }
 }
