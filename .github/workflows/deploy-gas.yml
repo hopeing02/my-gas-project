@@ -21,10 +21,8 @@ jobs:
         with:
           node-version: '20'
       
-      - name: Install dependencies
-        run: |
-          npm install -g @google/clasp@latest
-          npm install
+      - name: Install clasp
+        run: npm install -g @google/clasp@latest
       
       - name: Setup credentials
         run: |
@@ -42,7 +40,7 @@ jobs:
               token: {
                 access_token: token.access_token,
                 refresh_token: token.refresh_token,
-                scope: "https://www.googleapis.com/auth/script.projects https://www.googleapis.com/auth/script.webapp.deploy https://www.googleapis.com/auth/logging.read https://www.googleapis.com/auth/service.management https://www.googleapis.com/auth/drive.metadata.readonly https://www.googleapis.com/auth/drive.file",
+                scope: "https://www.googleapis.com/auth/script.projects https://www.googleapis.com/auth/script.webapp.deploy https://www.googleapis.com/auth/logging.read",
                 token_type: token.token_type || "Bearer",
                 expiry_date: token.expiry_date
               },
@@ -53,7 +51,7 @@ jobs:
               },
               isLocalCreds: false
             };
-            console.log('✅ Credentials converted');
+            console.log('✅ Credentials ready');
           } else {
             result = data;
           }
@@ -66,11 +64,19 @@ jobs:
           echo "🔍 Validating JavaScript syntax..."
           for file in src/*.gs; do
             if [ -f "$file" ]; then
-              echo "Checking $(basename $file)..."
+              echo "  Checking $(basename $file)..."
               node --check "$file"
             fi
           done
           echo "✅ All files have valid syntax"
+      
+      - name: Verify project structure
+        run: |
+          echo "📁 Project structure:"
+          ls -la src/
+          echo ""
+          echo "📋 .clasp.json:"
+          cat .clasp.json
       
       - name: Deploy to Apps Script
         run: |
@@ -78,130 +84,101 @@ jobs:
           clasp push --force
           echo "✅ Code deployed successfully"
       
-      - name: Enable Apps Script API
+      - name: Create new deployment
+        id: deploy
         run: |
-          echo "🔧 Ensuring Apps Script API is enabled..."
-          clasp apis enable script 2>/dev/null || echo "API already enabled or using default"
+          echo "🚀 Creating new web app deployment..."
+          DEPLOY_OUTPUT=$(clasp deploy --description "Auto-deploy $(date +'%Y-%m-%d %H:%M:%S')" 2>&1)
+          echo "$DEPLOY_OUTPUT"
+          
+          # Deployment ID 추출
+          DEPLOY_ID=$(echo "$DEPLOY_OUTPUT" | grep -oP '(?<=Created version )\d+|(?<=- )[A-Za-z0-9_-]+' | head -1)
+          
+          if [ -n "$DEPLOY_ID" ]; then
+            echo "deployment_id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+            echo "✅ Deployment ID: $DEPLOY_ID"
+          else
+            echo "⚠️  Could not extract deployment ID, will use existing deployment"
+          fi
+      
+      - name: Get Web App URL
+        id: webapp
+        run: |
+          echo "🔗 Getting web app URL..."
+          
+          # Web App URL이 Secret에 있으면 사용
+          if [ -n "${{ secrets.WEBAPP_URL }}" ]; then
+            WEBAPP_URL="${{ secrets.WEBAPP_URL }}"
+            echo "✅ Using saved Web App URL"
+          else
+            # deployments 목록에서 URL 추출 시도
+            DEPLOYMENTS=$(clasp deployments 2>&1)
+            echo "$DEPLOYMENTS"
+            
+            # URL 패턴 찾기
+            WEBAPP_URL=$(echo "$DEPLOYMENTS" | grep -oP 'https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec' | head -1)
+            
+            if [ -z "$WEBAPP_URL" ]; then
+              echo "⚠️  Web App URL not found!"
+              echo "Please deploy manually and add WEBAPP_URL to secrets:"
+              echo "1. Run: clasp open"
+              echo "2. Deploy → New deployment → Web app"
+              echo "3. Copy URL and add to GitHub Secrets as WEBAPP_URL"
+              exit 1
+            fi
+          fi
+          
+          echo "webapp_url=$WEBAPP_URL" >> $GITHUB_OUTPUT
+          echo "🌐 Web App URL: $WEBAPP_URL"
       
       - name: Run automated tests
         id: test
         run: |
-          echo "🧪 Running automated tests via Apps Script API..."
+          echo "🧪 Running automated tests..."
+          WEBAPP_URL="${{ steps.webapp.outputs.webapp_url }}"
+          TEST_URL="${WEBAPP_URL}?test=1"
           
-          # Node.js 스크립트로 테스트 실행
-          node << 'TESTSCRIPT'
-          const { google } = require('googleapis');
-          const fs = require('fs');
-          
-          async function runTests() {
-            try {
-              // 인증 정보 로드
-              const credentials = JSON.parse(fs.readFileSync(process.env.HOME + '/.clasprc.json', 'utf8'));
-              const claspConfig = JSON.parse(fs.readFileSync('.clasp.json', 'utf8'));
-              
-              // OAuth2 클라이언트 생성
-              const oauth2Client = new google.auth.OAuth2(
-                credentials.oauth2ClientSettings.clientId,
-                credentials.oauth2ClientSettings.clientSecret,
-                credentials.oauth2ClientSettings.redirectUri
-              );
-              
-              oauth2Client.setCredentials(credentials.token);
-              
-              // Apps Script API 클라이언트
-              const script = google.script({ version: 'v1', auth: oauth2Client });
-              
-              console.log('📋 Script ID:', claspConfig.scriptId);
-              console.log('🚀 Executing testAll() function...');
-              
-              // testAll 함수 실행
-              const response = await script.scripts.run({
-                scriptId: claspConfig.scriptId,
-                requestBody: {
-                  function: 'testAll',
-                  devMode: true
-                }
-              });
-              
-              console.log('\n=== Test Execution Results ===');
-              
-              if (response.data.error) {
-                console.error('❌ Test execution failed!');
-                console.error('Error:', response.data.error.details);
-                process.exit(1);
-              }
-              
-              if (response.data.response) {
-                const result = response.data.response.result;
-                console.log('Response:', JSON.stringify(result, null, 2));
-                
-                // 결과 분석
-                if (typeof result === 'object' && result.failed > 0) {
-                  console.error(`❌ Tests failed: ${result.failed} out of ${result.total}`);
-                  if (result.errors) {
-                    result.errors.forEach(err => {
-                      console.error(`  - ${err.test}: ${err.error}`);
-                    });
-                  }
-                  process.exit(1);
-                } else {
-                  console.log('✅ All tests passed!');
-                  if (result.total) {
-                    console.log(`   Total: ${result.total}`);
-                    console.log(`   Passed: ${result.passed}`);
-                  }
-                }
-              } else {
-                console.log('✅ Test function executed successfully');
-              }
-              
-            } catch (error) {
-              console.error('❌ Error running tests:', error.message);
-              
-              if (error.message.includes('User has not enabled the Apps Script API')) {
-                console.error('\n🔧 Please enable the Apps Script API:');
-                console.error('   1. Visit: https://script.google.com/home/usersettings');
-                console.error('   2. Enable "Google Apps Script API"');
-              }
-              
-              if (error.code === 404) {
-                console.error('\n⚠️  Script not found. Please verify:');
-                console.error('   1. Script ID is correct in .clasp.json');
-                console.error('   2. You have access to the script');
-              }
-              
-              process.exit(1);
-            }
-          }
-          
-          runTests();
-          TESTSCRIPT
-      
-      - name: Fetch execution logs
-        if: always()
-        run: |
+          echo "📡 Calling: $TEST_URL"
           echo ""
-          echo "📋 Fetching execution logs..."
-          clasp logs --simplified || echo "⚠️  Could not fetch detailed logs"
+          
+          # HTTP 요청 (최대 30초 대기)
+          RESPONSE=$(curl -L -s -m 30 "$TEST_URL")
+          echo "Response:"
+          echo "$RESPONSE" | jq '.' 2>/dev/null || echo "$RESPONSE"
+          echo ""
+          
+          # JSON 파싱 및 결과 확인
+          SUCCESS=$(echo "$RESPONSE" | jq -r '.success' 2>/dev/null)
+          
+          if [ "$SUCCESS" = "true" ]; then
+            PASSED=$(echo "$RESPONSE" | jq -r '.results.passed' 2>/dev/null)
+            TOTAL=$(echo "$RESPONSE" | jq -r '.results.total' 2>/dev/null)
+            echo "✅ All tests passed! ($PASSED/$TOTAL)"
+            echo "test_result=success" >> $GITHUB_OUTPUT
+          else
+            ERROR=$(echo "$RESPONSE" | jq -r '.error' 2>/dev/null)
+            echo "❌ Tests failed!"
+            echo "Error: $ERROR"
+            echo "test_result=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
       
-      - name: Generate test report
+      - name: Test summary
         if: always()
         run: |
-          if [ "${{ steps.test.outcome }}" = "success" ]; then
+          if [ "${{ steps.test.outputs.test_result }}" = "success" ]; then
             echo "### ✅ Deployment & Tests Successful" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "🎉 All tests passed! Your code is deployed and working." >> $GITHUB_STEP_SUMMARY
+            echo "🎉 All tests passed! Your code is live." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Web App URL:** ${{ steps.webapp.outputs.webapp_url }}" >> $GITHUB_STEP_SUMMARY
           else
             echo "### ❌ Tests Failed" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "⚠️  Code was deployed but tests did not pass." >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Action Required:**" >> $GITHUB_STEP_SUMMARY
-            echo "- Check the test logs above" >> $GITHUB_STEP_SUMMARY
-            echo "- Run \`clasp open\` to debug in Apps Script Editor" >> $GITHUB_STEP_SUMMARY
+            echo "**Troubleshooting:**" >> $GITHUB_STEP_SUMMARY
+            echo "1. Run \`clasp open\` to debug" >> $GITHUB_STEP_SUMMARY
+            echo "2. Manually run \`testAll()\` in the editor" >> $GITHUB_STEP_SUMMARY
+            echo "3. Check execution logs" >> $GITHUB_STEP_SUMMARY
           fi
-      
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "::error::Deployment or tests failed! Check logs above for details."
